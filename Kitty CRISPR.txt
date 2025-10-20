@@ -1,0 +1,36 @@
+# Kitty CRISPR 
+# Raspberry Pi Zero 2W hallway game
+# Hall sensors (KY‑003 / A3144), 3.5" display, nightly cat generation → SVG/PNG
+# Repo layout shown inline below. Copy each file to the matching path.
+# ──────────────────────────────────────────────────────────────────────────────
+
+## Install
+```bash
+sudo apt update && sudo apt install -y python3-pip python3-pil python3-pygame
+pip3 install -r requirements.txt
+```
+
+## Run display (boot‑time)
+```bash
+python3 display_cat.py
+```
+(You can daemonize with systemd later; for now you can screen/tmux it.)
+
+## Nightly generation via cron (11:00 PM local)
+```bash
+crontab -e
+# add the line:
+0 23 * * * /usr/bin/python3 /home/pi/kitty_crispr/generate_cat.py >> /home/pi/kitty_crispr/log.txt 2>&1
+```
+
+## Test sensors
+```bash
+python3 sensors_test.py
+```
+Place magnets over each sensor and verify that exactly one sensor per trait reads ACTIVE.
+
+## Assets
+This build programmatically draws a simple cartoon cat (SVG), then renders PNG. You can
+swap in your own artist SVG parts later – just replace the layer functions in
+`compose_svg.py` (they’re isolated and easy to customize).
+
