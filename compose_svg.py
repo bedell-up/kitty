@@ -1,133 +1,103 @@
-# 📁 FILE: compose_svg.py
-# Build a simple layered SVG cat from selected alleles.
-from typing import Dict
-from config import DISPLAY_WIDTH, DISPLAY_HEIGHT
-
-SVG_HEADER = f"""
-<svg xmlns='http://www.w3.org/2000/svg' width='{DISPLAY_WIDTH}' height='{DISPLAY_HEIGHT}' viewBox='0 0 {DISPLAY_WIDTH} {DISPLAY_HEIGHT}'>
-  <defs>
-    <filter id='shadow' x='-20%' y='-20%' width='140%' height='140%'>
-      <feDropShadow dx='0' dy='2' stdDeviation='3' flood-opacity='0.25'/>
-    </filter>
-  </defs>
-  <rect width='100%' height='100%' fill='#f5efe6'/>
-"""
-
-SVG_FOOTER = "</svg>\n"
-
-# Utility to add a group with optional shadow
-
-
 def g(content: str, shadow=False) -> str:
-    return f"<g{' filter=\"url(#shadow)\"' if shadow else ''}>{content}</g>\n"
-
-
-# Base body layer (neutral)
-
-
-def layer_body():
-    cx, cy = DISPLAY_WIDTH // 2, int(DISPLAY_HEIGHT * 0.58)
-    body = f"""
-    <ellipse cx='{cx}' cy='{cy}' rx='{int(DISPLAY_WIDTH*0.26)}' ry='{int(DISPLAY_HEIGHT*0.22)}' fill='#f1d3b3' stroke='#8f775f' stroke-width='3'/>
-    """
-    head = f"""
-    <ellipse cx='{cx}' cy='{int(DISPLAY_HEIGHT*0.33)}' rx='{int(DISPLAY_WIDTH*0.20)}' ry='{int(DISPLAY_HEIGHT*0.16)}' fill='#f1d3b3' stroke='#8f775f' stroke-width='3'/>
-    """
-    return g(body + head, shadow=True)
-
-
-# Ears: pointy vs floppy
-
-
-def layer_ears(allele: str):
-    cx, y = DISPLAY_WIDTH // 2, int(DISPLAY_HEIGHT * 0.19)
-    if allele == "pointy":
-        ears = f"""
-        <polygon points='{cx-90},{y+20} {cx-40},{y-40} {cx-10},{y+10}' fill='#f1d3b3' stroke='#8f775f' stroke-width='3'/>
-        <polygon points='{cx+90},{y+20} {cx+40},{y-40} {cx+10},{y+10}' fill='#f1d3b3' stroke='#8f775f' stroke-width='3'/>
-        """
-    else:  # floppy
-        ears = f"""
-        <path d='M {cx-80},{y-5} q -30,40 10,70' fill='none' stroke='#8f775f' stroke-width='12' stroke-linecap='round'/>
-        <path d='M {cx+80},{y-5} q 30,40 -10,70'  fill='none' stroke='#8f775f' stroke-width='12' stroke-linecap='round'/>
-        """
-    return g(ears)
-
-
-# Fur length: long vs short → mane/ruff
-
-
-def layer_fur(allele: str):
-    cx, cy = DISPLAY_WIDTH // 2, int(DISPLAY_HEIGHT * 0.33)
-    if allele == "long":
-        ruff = f"<path d='M {cx-120},{cy+30} q 40,40 80,0 q 40,-40 80,0' fill='none' stroke='#b88c66' stroke-width='8' stroke-linecap='round'/>"
+    """Wrap an SVG element group, with optional drop shadow filter."""
+    if shadow:
+        return '<g filter="url(#shadow)">' + content + "</g>\n"
     else:
-        ruff = f"<path d='M {cx-90},{cy+30} q 30,20 60,0 q 30,-20 60,0' fill='none' stroke='#b88c66' stroke-width='5' stroke-linecap='round'/>"
-    return g(ruff)
+        return "<g>" + content + "</g>\n"
 
 
-# Tail: long vs bob
-
-
-def layer_tail(allele: str):
-    base_x, base_y = int(DISPLAY_WIDTH * 0.7), int(DISPLAY_HEIGHT * 0.55)
-    if allele == "long":
-        tail = f"<path d='M {base_x},{base_y} q 80,-80 40,-140 q -20,-50 -60,-10' fill='none' stroke='#8f775f' stroke-width='16' stroke-linecap='round'/>"
-    else:
-        tail = f"<path d='M {base_x},{base_y} q 30,-10 10,-40' fill='none' stroke='#8f775f' stroke-width='16' stroke-linecap='round'/>"
-    return g(tail, shadow=True)
-
-
-# Pattern: stripes vs spots
-
-
-def layer_pattern(allele: str):
-    cx, cy = DISPLAY_WIDTH // 2, int(DISPLAY_HEIGHT * 0.58)
-    if allele == "stripes":
-        pats = []
-        for dx in (-80, -40, 0, 40, 80):
-            pats.append(f"<path d='M {cx+dx},{cy-60} q 10,30 -10,60' stroke='#8f775f' stroke-width='8' fill='none'/>")
-        return g("".join(pats))
-    else:  # spots
-        pats = []
-        for dx, dy, r in [(-70, -30, 14), (-10, -10, 18), (50, 0, 12), (80, -40, 10)]:
-            pats.append(f"<circle cx='{cx+dx}' cy='{cy+dy}' r='{r}' fill='#8f775f' opacity='0.8'/>")
-        return g("".join(pats))
-
-
-# Eyes: green vs blue
-
-
-def layer_eyes(allele: str):
-    cx, cy = DISPLAY_WIDTH // 2, int(DISPLAY_HEIGHT * 0.33)
-    iris = "#3dbb6f" if allele == "green" else "#4aa3ff"
-    eyes = f"""
-      <ellipse cx='{cx-38}' cy='{cy}' rx='20' ry='14' fill='white' stroke='#333' stroke-width='3'/>
-      <ellipse cx='{cx+38}' cy='{cy}' rx='20' ry='14' fill='white' stroke='#333' stroke-width='3'/>
-      <circle cx='{cx-38}' cy='{cy}' r='8' fill='{iris}'/>
-      <circle cx='{cx+38}' cy='{cy}' r='8' fill='{iris}'/>
-      <circle cx='{cx-38}' cy='{cy}' r='3' fill='black'/>
-      <circle cx='{cx+38}' cy='{cy}' r='3' fill='black'/>
+def build_cat_svg(traits, caption="Custom Kitty") -> str:
     """
-    return g(eyes)
+    traits: dict like {"A": "long", "B": "floppy", "C": "bob", "D": "spots", "E": "green"}
+    caption: string displayed at the top
+    Returns full SVG string.
+    """
 
+    svg = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<svg xmlns="http://www.w3.org/2000/svg" width="480" height="320" viewBox="0 0 480 320">',
+        "<defs>",
+        '<filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">'
+        '<feDropShadow dx="3" dy="3" stdDeviation="3" flood-color="#444" flood-opacity="0.4"/>'
+        "</filter>",
+        "</defs>",
+        '<rect width="100%" height="100%" fill="#f5efe6"/>',
+    ]
 
-# Caption
+    # --- Title / caption ---
+    svg.append(
+        f'<text x="50%" y="35" font-size="18" text-anchor="middle" '
+        f'font-family="Verdana" fill="#333">{caption}</text>'
+    )
 
+    # --- Base body ---
+    body = '<ellipse cx="240" cy="200" rx="90" ry="60" fill="#f1d3b3" stroke="#7b5c3e" stroke-width="3"/>'
+    head = '<circle cx="240" cy="120" r="45" fill="#f1d3b3" stroke="#7b5c3e" stroke-width="3"/>'
+    svg.append(g(body + head, shadow=True))
 
-def layer_caption(text: str):
-    return f"<text x='50%' y='{int(DISPLAY_HEIGHT*0.08)}' text-anchor='middle' font-size='22' font-family='Verdana' fill='#333'>{text}</text>\n"
+    # --- Ears ---
+    ear_type = traits.get("B", "pointed")
+    if ear_type == "floppy":
+        ears = (
+            '<path d="M200 70 Q180 90 200 110" fill="none" stroke="#7b5c3e" stroke-width="6"/>'
+            '<path d="M280 70 Q300 90 280 110" fill="none" stroke="#7b5c3e" stroke-width="6"/>'
+        )
+    else:
+        ears = (
+            '<polygon points="200,70 180,100 220,95" fill="#f1d3b3" stroke="#7b5c3e" stroke-width="3"/>'
+            '<polygon points="280,70 300,100 260,95" fill="#f1d3b3" stroke="#7b5c3e" stroke-width="3"/>'
+        )
+    svg.append(g(ears))
 
+    # --- Eyes ---
+    eye_color = traits.get("E", "green")
+    eye_fill = "#6cc24a" if "green" in eye_color else "#4aa3f1"
+    eyes = (
+        f'<ellipse cx="225" cy="120" rx="8" ry="10" fill="{eye_fill}" stroke="#000"/>'
+        f'<ellipse cx="255" cy="120" rx="8" ry="10" fill="{eye_fill}" stroke="#000"/>'
+    )
+    svg.append(g(eyes))
 
-def build_cat_svg(trait_values: Dict[str, str], caption: str) -> str:
-    # trait_values: {'A':'long','B':'pointy', ...} resolved to labels
-    parts = [SVG_HEADER]
-    parts.append(layer_caption(caption))
-    parts.append(layer_body())
-    parts.append(layer_tail(trait_values.get("C", "long")))
-    parts.append(layer_fur(trait_values.get("A", "short")))
-    parts.append(layer_ears(trait_values.get("B", "pointy")))
-    parts.append(layer_pattern(trait_values.get("D", "stripes")))
-    parts.append(layer_eyes(trait_values.get("E", "green")))
-    parts.append(SVG_FOOTER)
-    return "".join(parts)
+    # --- Tail ---
+    tail_type = traits.get("C", "long")
+    if tail_type == "bob":
+        tail = '<circle cx="330" cy="210" r="15" fill="#f1d3b3" stroke="#7b5c3e" stroke-width="3"/>'
+    else:
+        tail = (
+            '<path d="M320 210 q40 -10 60 20" fill="none" stroke="#7b5c3e" stroke-width="10" stroke-linecap="round"/>'
+        )
+    svg.append(g(tail, shadow=True))
+
+    # --- Fur length (mane) ---
+    fur = traits.get("A", "short")
+    if fur == "long":
+        mane = (
+            '<path d="M195 130 q45 30 90 0" fill="none" stroke="#7b5c3e" stroke-width="5"/>'
+            '<path d="M190 140 q50 35 100 0" fill="none" stroke="#7b5c3e" stroke-width="4"/>'
+        )
+        svg.append(g(mane))
+
+    # --- Pattern ---
+    pattern = traits.get("D", "none")
+    if "spot" in pattern:
+        spots = (
+            '<circle cx="230" cy="200" r="8" fill="#7b5c3e"/>'
+            '<circle cx="255" cy="215" r="6" fill="#7b5c3e"/>'
+            '<circle cx="245" cy="185" r="5" fill="#7b5c3e"/>'
+        )
+        svg.append(g(spots))
+    elif "stripe" in pattern:
+        stripes = "".join([f'<rect x="{200 + i*15}" y="160" width="6" height="60" fill="#7b5c3e"/>' for i in range(4)])
+        svg.append(g(stripes))
+
+    # --- Nose & mouth ---
+    face = (
+        '<circle cx="240" cy="135" r="3" fill="#000"/>'
+        '<path d="M240 138 q-5 8 -10 10" stroke="#000" fill="none" stroke-width="1.5"/>'
+        '<path d="M240 138 q5 8 10 10" stroke="#000" fill="none" stroke-width="1.5"/>'
+    )
+    svg.append(g(face))
+
+    # --- Closing ---
+    svg.append("</svg>")
+    return "\n".join(svg)
