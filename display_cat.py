@@ -1,6 +1,15 @@
 # 📁 FILE: display_cat.py
 # Show the most recent cat PNG on a 480x320 display. Auto-reloads if file changes.
 import os, time
+import os
+
+# Use framebuffer if it exists, otherwise dummy (for HDMI/headless testing)
+if os.path.exists("/dev/fb1"):
+    os.environ.setdefault("SDL_FBDEV", "/dev/fb1")
+    os.environ.setdefault("SDL_VIDEODRIVER", "fbcon")
+else:
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+
 import pygame
 from config import DISPLAY_WIDTH, DISPLAY_HEIGHT, PNG_PATH
 
