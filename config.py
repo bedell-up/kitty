@@ -1,4 +1,13 @@
 # 📁 FILE: config.py
+
+CUSTOMER_TEMPLATES = [
+    "I demand a cat perfect for intergalactic tea parties.",
+    "I require an apex cuddler—sleek yet chaotic.",
+    "Fetch me a museum-quality mischief-machine.",
+    "I need a cat that screams ‘I read journals but knock over plants.’",
+    "Give me a cat optimized for naps and villain monologues.",
+]
+
 # Pin map and trait definitions. Adjust names or add new traits here.
 TRAITS = [
     {"slot": "A", "name": "Fur Length", "pins": {"dom": 5, "rec": 6}, "alleles": {"dom": "long", "rec": "short"}},
