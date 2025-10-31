@@ -1,125 +1,107 @@
-# Kitty CRISPR – Pi Zero 2W with KY‑003 Hall sensors + LED feedback + test mode
+# sensors.py
+import time
+import spidev
+import RPi.GPIO as GPIO
+from statistics import mean
+from config import HALL_PINS, LED_PINS, ADC_CHANNEL, ADC_ID_THRESHOLDS
 
-import os, json, argparse
-from datetime import datetime
-from gpiozero import Button, LED
-from time import sleep
-from config import TRAITS, DISPLAY_WIDTH, DISPLAY_HEIGHT, OUT_DIR, SVG_PATH, PNG_PATH, JSON_PATH
-from compose_svg import build_cat_svg
-import cairosvg
-
-# LED pin mapping (adjust as needed)
-LED_PINS = {
-    "A": {"green": 26, "red": 27},
-    "B": {"green": 17, "red": 18},
-    "C": {"green": 24, "red": 25},
-    "D": {"green": 8, "red": 7},
-    "E": {"green": 9, "red": 10},
-}
-
-CUSTOMER_TEMPLATES = [
-    "I demand a cat perfect for intergalactic tea parties.",
-    "I require an apex cuddler—sleek yet chaotic.",
-    "Fetch me a museum‑quality mischief‑machine.",
-    "I need a cat that screams ‘I read journals but knock over plants.’",
-    "Give me a cat optimized for naps and villain monologues.",
-]
+SLOTS = ["A", "B", "C", "D", "E"]
 
 
 class GeneBoard:
     def __init__(self):
-        self.sensors = {}
-        for t in TRAITS:
-            slot = t["slot"]
-            dom_pin = t["pins"]["dom"]
-            rec_pin = t["pins"]["rec"]
-            self.sensors[slot] = {
-                "dom": Button(dom_pin, pull_up=True, bounce_time=0.02),
-                "rec": Button(rec_pin, pull_up=True, bounce_time=0.02),
-                "led_g": LED(LED_PINS[slot]["green"]),
-                "led_r": LED(LED_PINS[slot]["red"]),
-            }
+        GPIO.setmode(GPIO.BCM)
+        # Hall sensors
+        for slot, pins in HALL_PINS.items():
+            GPIO.setup(pins["dom"], GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            GPIO.setup(pins["rec"], GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        # LEDs
+        for slot, pins in LED_PINS.items():
+            GPIO.setup(pins["green"], GPIO.OUT, initial=GPIO.LOW)
+            GPIO.setup(pins["red"], GPIO.OUT, initial=GPIO.LOW)
+        # Default LED state: show "needs tile" (red ON)
+        for slot, pins in LED_PINS.items():
+            GPIO.output(pins["green"], GPIO.LOW)
+            GPIO.output(pins["red"], GPIO.HIGH)
 
-    def read_and_light(self):
-        state = {}
-        for slot, parts in self.sensors.items():
-            dom_active = not parts["dom"].is_pressed
-            rec_active = not parts["rec"].is_pressed
-            if dom_active ^ rec_active:
-                state[slot] = "dom" if dom_active else "rec"
-                parts["led_g"].on()
-                parts["led_r"].off()
+        # SPI for MCP3008 on CE0
+        self.spi = spidev.SpiDev()
+        self.spi.open(0, 0)
+        self.spi.max_speed_hz = 1_000_000
+
+    def close(self):
+        try:
+            self.spi.close()
+        finally:
+            GPIO.cleanup()
+
+    # ----- ADC helpers -----
+    def _read_adc_raw(self, ch: int) -> int:
+        r = self.spi.xfer2([1, (8 + ch) << 4, 0])
+        return ((r[1] & 3) << 8) | r[2]  # 0..1023
+
+    def _adc_to_volts(self, raw: int) -> float:
+        return 3.3 * raw / 1023.0
+
+    def read_slot_voltage(self, slot: str, samples: int = 5) -> float:
+        ch = ADC_CHANNEL[slot]
+        vals = [self._adc_to_volts(self._read_adc_raw(ch)) for _ in range(samples)]
+        return round(mean(vals), 3)
+
+    def decode_tile_id(self, slot: str, volts: float) -> str | None:
+        table = sorted(ADC_ID_THRESHOLDS.get(slot, []), key=lambda x: x[0])
+        for max_v, label in table:
+            if volts <= (max_v + 0.03):  # small hysteresis
+                return label
+        return None
+
+    # ----- Hall sensors -----
+    def read_allele(self, slot: str) -> str | None:
+        pins = HALL_PINS[slot]
+        dom_active = GPIO.input(pins["dom"]) == GPIO.LOW
+        rec_active = GPIO.input(pins["rec"]) == GPIO.LOW
+        if dom_active and not rec_active:
+            return "dom"
+        if rec_active and not dom_active:
+            return "rec"
+        if not dom_active and not rec_active:
+            return None
+        return "invalid"
+
+    # ----- One-shot read of all slots -----
+    def snapshot(self) -> dict:
+        data = {}
+        for slot in SLOTS:
+            allele = self.read_allele(slot)
+            # Only sample ADC if a tile is present (dom/rec)
+            volts = self.read_slot_voltage(slot) if allele in ("dom", "rec") else 0.0
+            tile_id = self.decode_tile_id(slot, volts) if allele in ("dom", "rec") else None
+            data[slot] = {"allele": allele, "volts": volts, "tile_id": tile_id}
+        return data
+
+    # ----- Presence-only LEDs -----
+    def update_leds_presence(self, live: dict):
+        """
+        Green ON if a tile is present and properly seated (allele == dom/rec).
+        Red ON otherwise (empty or invalid).
+        """
+        for slot, info in live.items():
+            g = LED_PINS[slot]["green"]
+            r = LED_PINS[slot]["red"]
+            allele = info.get("allele")
+            if allele in ("dom", "rec"):
+                GPIO.output(g, GPIO.HIGH)
+                GPIO.output(r, GPIO.LOW)
             else:
-                state[slot] = "unknown"
-                parts["led_g"].off()
-                parts["led_r"].on()
-        return state
+                GPIO.output(g, GPIO.LOW)
+                GPIO.output(r, GPIO.HIGH)
 
-
-def resolve_trait_labels(state):
-    mapping = {}
-    for t in TRAITS:
-        slot = t["slot"]
-        allele = state.get(slot, "unknown")
-        if allele in ("dom", "rec"):
-            mapping[slot] = t["alleles"][allele]
-        else:
-            mapping[slot] = list(t["alleles"].values())[0]
-    return mapping
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Kitty CRISPR Cat Generator")
-    parser.add_argument("--test", nargs="*", help="Manual test mode: e.g. --test A=dom B=rec C=dom")
-    args = parser.parse_args()
-
-    if args.test:
-        # Manual test mode
-        state = {pair.split("=")[0].upper(): pair.split("=")[1].lower() for pair in args.test}
-        print(f"[TEST MODE] Using manual gene combo: {state}")
-    else:
-        # Live mode
-        gb = GeneBoard()
-        print("Reading sensors and lighting LEDs...")
-        sleep(1)
-        state = gb.read_and_light()
-
-    enriched = {}
-    for t in TRAITS:
-        slot = t["slot"]
-        allele = state.get(slot, "unknown")
-        label = t["alleles"].get(allele, "unknown") if allele in ("dom", "rec") else "unknown"
-        enriched[slot] = {"allele": allele, "label": label, "trait": t["name"]}
-
-    trait_values = resolve_trait_labels(state)
-
-    now = datetime.now()
-    code = "".join([state.get(t["slot"], "?")[0].upper() for t in TRAITS])
-    customer = CUSTOMER_TEMPLATES[now.day % len(CUSTOMER_TEMPLATES)]
-    caption = f"Customer: {customer}"
-
-    svg = build_cat_svg(trait_values, caption)
-    os.makedirs(OUT_DIR, exist_ok=True)
-    with open(SVG_PATH, "w") as f:
-        f.write(svg)
-
-    cairosvg.svg2png(bytestring=svg.encode("utf-8"), write_to=PNG_PATH)
-
-    payload = {
-        "timestamp": now.isoformat(),
-        "genotype": state,
-        "phenotype": trait_values,
-        "caption": caption,
-        "code": code,
-        "png": PNG_PATH,
-        "svg": SVG_PATH,
-    }
-
-    with open(JSON_PATH, "w") as f:
-        json.dump(payload, f, indent=2)
-
-    print(f"Generated {PNG_PATH} and {JSON_PATH}")
-
-
-if __name__ == "__main__":
-    main()
+    # ----- Simple calibration helper -----
+    def calibrate_adc(self, slot: str, seconds: int = 3):
+        print(f"[Calibrate] Hold the tile for slot {slot} in place for {seconds}s …")
+        vals = []
+        t0 = time.time()
+        while time.time() - t0 < seconds:
+            vals.append(self.read_slot_voltage(slot, samples=3))
+            time.sleep(0.05)
+        print(f"Slot {slot}: avg={mean(vals):.3f} V  min={min(vals):.3f}  max={max(vals):.3f}")

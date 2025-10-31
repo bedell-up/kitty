@@ -1,103 +1,91 @@
-def g(content: str, shadow=False) -> str:
-    """Wrap an SVG element group, with optional drop shadow filter."""
-    if shadow:
-        return '<g filter="url(#shadow)">' + content + "</g>\n"
-    else:
-        return "<g>" + content + "</g>\n"
+#!/usr/bin/env python3
+"""
+compose_svg.py — builds the SVG representation of the Kitty CRISPR cat
+based on its trait values.
+
+Called by generate_cat.py
+"""
+
+from pathlib import Path
+
+CANVAS_W, CANVAS_H = 800, 480
+
+# Basic color + shape libraries for each trait
+COLORS = {
+    "body": {"Striped": "#d68a39", "Gray": "#999999"},
+    "eyes": {"Green Eyes": "#54ff75", "Blue Eyes": "#3a7bff"},
+    "pattern": {"Spotted": "spots", "Solid": "solid"},
+}
+
+TAILS = {
+    "Long Tail": "<rect x='515' y='270' width='70' height='15' rx='7' ry='7' fill='{color}'/>",
+    "Short Tail": "<rect x='515' y='270' width='30' height='15' rx='7' ry='7' fill='{color}'/>",
+}
+
+EARS = {
+    "Pointy Ears": """
+        <polygon points='360,160 380,130 390,160' fill='{color}'/>
+        <polygon points='440,160 420,130 410,160' fill='{color}'/>""",
+    "Rounded Ears": """
+        <ellipse cx='370' cy='145' rx='10' ry='15' fill='{color}'/>
+        <ellipse cx='430' cy='145' rx='10' ry='15' fill='{color}'/>""",
+}
 
 
-def build_cat_svg(traits, caption="Custom Kitty") -> str:
-    """
-    traits: dict like {"A": "long", "B": "floppy", "C": "bob", "D": "spots", "E": "green"}
-    caption: string displayed at the top
-    Returns full SVG string.
-    """
+def compose_svg(trait_values: dict, caption: str) -> str:
+    """Return a full SVG string for the cat based on resolved traits."""
 
-    svg = [
-        '<?xml version="1.0" encoding="UTF-8"?>',
-        '<svg xmlns="http://www.w3.org/2000/svg" width="480" height="320" viewBox="0 0 480 320">',
-        "<defs>",
-        '<filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">'
-        '<feDropShadow dx="3" dy="3" stdDeviation="3" flood-color="#444" flood-opacity="0.4"/>'
-        "</filter>",
-        "</defs>",
-        '<rect width="100%" height="100%" fill="#f5efe6"/>',
-    ]
+    body_color = COLORS["body"].get(trait_values.get("A"), "#aaaaaa")
+    eye_color = COLORS["eyes"].get(trait_values.get("B"), "#66ccff")
+    tail_shape = TAILS.get(trait_values.get("C"), TAILS["Short Tail"])
+    ear_shape = EARS.get(trait_values.get("D"), EARS["Pointy Ears"])
+    pattern_type = COLORS["pattern"].get(trait_values.get("E"), "solid")
 
-    # --- Title / caption ---
-    svg.append(
-        f'<text x="50%" y="35" font-size="18" text-anchor="middle" '
-        f'font-family="Verdana" fill="#333">{caption}</text>'
-    )
-
-    # --- Base body ---
-    body = '<ellipse cx="240" cy="200" rx="90" ry="60" fill="#f1d3b3" stroke="#7b5c3e" stroke-width="3"/>'
-    head = '<circle cx="240" cy="120" r="45" fill="#f1d3b3" stroke="#7b5c3e" stroke-width="3"/>'
-    svg.append(g(body + head, shadow=True))
-
-    # --- Ears ---
-    ear_type = traits.get("B", "pointed")
-    if ear_type == "floppy":
-        ears = (
-            '<path d="M200 70 Q180 90 200 110" fill="none" stroke="#7b5c3e" stroke-width="6"/>'
-            '<path d="M280 70 Q300 90 280 110" fill="none" stroke="#7b5c3e" stroke-width="6"/>'
+    # Simple pattern overlay (optional spots)
+    pattern_layer = ""
+    if pattern_type == "spots":
+        pattern_layer = "".join(
+            f"<circle cx='{x}' cy='{y}' r='8' fill='rgba(0,0,0,0.2)'/>"
+            for x, y in [(370, 310), (420, 320), (390, 340), (410, 285)]
         )
-    else:
-        ears = (
-            '<polygon points="200,70 180,100 220,95" fill="#f1d3b3" stroke="#7b5c3e" stroke-width="3"/>'
-            '<polygon points="280,70 300,100 260,95" fill="#f1d3b3" stroke="#7b5c3e" stroke-width="3"/>'
-        )
-    svg.append(g(ears))
 
-    # --- Eyes ---
-    eye_color = traits.get("E", "green")
-    eye_fill = "#6cc24a" if "green" in eye_color else "#4aa3f1"
-    eyes = (
-        f'<ellipse cx="225" cy="120" rx="8" ry="10" fill="{eye_fill}" stroke="#000"/>'
-        f'<ellipse cx="255" cy="120" rx="8" ry="10" fill="{eye_fill}" stroke="#000"/>'
-    )
-    svg.append(g(eyes))
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{CANVAS_W}" height="{CANVAS_H}">
+      <rect width="100%" height="100%" fill="#222"/>
+      <text x="{CANVAS_W/2}" y="50" font-size="28" text-anchor="middle" fill="white">{caption}</text>
 
-    # --- Tail ---
-    tail_type = traits.get("C", "long")
-    if tail_type == "bob":
-        tail = '<circle cx="330" cy="210" r="15" fill="#f1d3b3" stroke="#7b5c3e" stroke-width="3"/>'
-    else:
-        tail = (
-            '<path d="M320 210 q40 -10 60 20" fill="none" stroke="#7b5c3e" stroke-width="10" stroke-linecap="round"/>'
-        )
-    svg.append(g(tail, shadow=True))
+      <!-- Body -->
+      <ellipse cx="400" cy="300" rx="120" ry="70" fill="{body_color}"/>
 
-    # --- Fur length (mane) ---
-    fur = traits.get("A", "short")
-    if fur == "long":
-        mane = (
-            '<path d="M195 130 q45 30 90 0" fill="none" stroke="#7b5c3e" stroke-width="5"/>'
-            '<path d="M190 140 q50 35 100 0" fill="none" stroke="#7b5c3e" stroke-width="4"/>'
-        )
-        svg.append(g(mane))
+      <!-- Head -->
+      <circle cx="400" cy="200" r="50" fill="{body_color}"/>
+      <circle cx="380" cy="190" r="8" fill="{eye_color}"/>
+      <circle cx="420" cy="190" r="8" fill="{eye_color}"/>
 
-    # --- Pattern ---
-    pattern = traits.get("D", "none")
-    if "spot" in pattern:
-        spots = (
-            '<circle cx="230" cy="200" r="8" fill="#7b5c3e"/>'
-            '<circle cx="255" cy="215" r="6" fill="#7b5c3e"/>'
-            '<circle cx="245" cy="185" r="5" fill="#7b5c3e"/>'
-        )
-        svg.append(g(spots))
-    elif "stripe" in pattern:
-        stripes = "".join([f'<rect x="{200 + i*15}" y="160" width="6" height="60" fill="#7b5c3e"/>' for i in range(4)])
-        svg.append(g(stripes))
+      <!-- Ears -->
+      {ear_shape.format(color=body_color)}
 
-    # --- Nose & mouth ---
-    face = (
-        '<circle cx="240" cy="135" r="3" fill="#000"/>'
-        '<path d="M240 138 q-5 8 -10 10" stroke="#000" fill="none" stroke-width="1.5"/>'
-        '<path d="M240 138 q5 8 10 10" stroke="#000" fill="none" stroke-width="1.5"/>'
-    )
-    svg.append(g(face))
+      <!-- Tail -->
+      {tail_shape.format(color=body_color)}
 
-    # --- Closing ---
-    svg.append("</svg>")
-    return "\n".join(svg)
+      <!-- Pattern -->
+      {pattern_layer}
+
+      <!-- Ground -->
+      <rect y="400" width="100%" height="80" fill="#333"/>
+    </svg>"""
+
+    return svg
+
+
+if __name__ == "__main__":
+    # Example standalone test
+    traits = {
+        "A": "Striped",
+        "B": "Green Eyes",
+        "C": "Long Tail",
+        "D": "Pointy Ears",
+        "E": "Spotted",
+    }
+    svg_str = compose_svg(traits, "Test Cat — Manual Compose")
+    Path("output/test_cat.svg").write_text(svg_str)
+    print("✅ Wrote output/test_cat.svg")

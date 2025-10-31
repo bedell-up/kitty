@@ -1,214 +1,263 @@
 #!/usr/bin/env python3
-import os, json, argparse, base64
-from datetime import datetime
+import os, json, argparse, base64, random
+from datetime import datetime, date
 from pathlib import Path
+import cairosvg
 
-# --- Optional OpenAI (AI image gen) ---
+from config import ROUNDS, ROUND_START_OFFSET, TILE_ID_BY_SLOT, USE_MAX7219
+from sensors import GeneBoard
+
+# Optional AI image generation (set OPENAI_API_KEY env var to enable)
 _USE_AI = bool(os.getenv("OPENAI_API_KEY"))
 if _USE_AI:
     try:
         from openai import OpenAI
 
-        _openai_client = OpenAI()  # key read from env
+        _openai = OpenAI()
     except Exception:
-        _USE_AI = False  # fall back if client import fails
+        _USE_AI = False
 
-# --- Fallback SVG -> PNG ---
-import cairosvg
+# Optional MAX7219 7-seg percent
+_segdev = None
+if USE_MAX7219:
+    try:
+        from luma.core.interface.serial import spi as lspi
+        from luma.led_matrix.device import max7219
 
-from config import CUSTOMER_TEMPLATES, TRAITS
+        serial = lspi(port=0, device=1)  # CE1
+        _segdev = max7219(serial, cascaded=1, block_orientation=0, rotate=0)
+    except Exception:
+        _segdev = None
 
-# Optional external SVG composer; otherwise we use an internal one.
-try:
-    from compose_svg import compose_svg as _compose_svg
-except Exception:
-    _compose_svg = None
-
-# --- Output paths ---
-OUT_DIR = Path("output")
-SVG_PATH = OUT_DIR / "cat.svg"
-PNG_PATH = OUT_DIR / "cat.png"
-JSON_PATH = OUT_DIR / "cat_of_the_day.json"
-OUT_DIR.mkdir(exist_ok=True)
-
-# -----------------------------------------------------------
-# Helpers
-# -----------------------------------------------------------
+OUT = Path("output")
+OUT.mkdir(exist_ok=True)
+SVG_PATH = OUT / "cat.svg"
+PNG_PATH = OUT / "cat.png"
+JSON_PATH = OUT / "cat_of_the_day.json"
+STATE_PATH = OUT / "game_state.json"
+SLOTS = ["A", "B", "C", "D", "E"]
 
 
-def resolve_trait_labels(state: dict):
-    """Convert genotype {'A':'dom'/'rec',...} -> human-readable trait labels using TRAITS."""
+# ---------- Round state ----------
+def _round_by_id(rid: int) -> dict:
+    for r in ROUNDS:
+        if r["id"] == rid:
+            return r
+    raise SystemExit(f"No round with id={rid}")
+
+
+def _default_round_for_today() -> dict:
+    idx = (date.today().toordinal() + ROUND_START_OFFSET) % len(ROUNDS)
+    return ROUNDS[idx]
+
+
+def _random_target() -> dict:
+    return {s: random.choice(["dom", "rec"]) for s in SLOTS}
+
+
+def _load_state() -> dict:
+    if STATE_PATH.exists():
+        try:
+            return json.loads(STATE_PATH.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _save_state(state: dict):
+    STATE_PATH.write_text(json.dumps(state, indent=2))
+
+
+def get_or_init_game_state(round_override: int | None) -> dict:
+    st = _load_state()
+    if round_override:
+        r = _round_by_id(round_override)
+        st = {"current_round_id": r["id"], "target_genotype": _random_target(), "advance_on_next_run": False}
+        _save_state(st)
+        return st
+    if "current_round_id" not in st or "target_genotype" not in st:
+        r = _default_round_for_today()
+        st = {"current_round_id": r["id"], "target_genotype": _random_target(), "advance_on_next_run": False}
+        _save_state(st)
+    return st
+
+
+def maybe_advance_round(state: dict) -> dict:
+    if not state.get("advance_on_next_run"):
+        return state
+    ids = [r["id"] for r in ROUNDS]
+    cur = ids.index(state["current_round_id"])
+    nxt = ids[(cur + 1) % len(ids)]
+    new = {"current_round_id": nxt, "target_genotype": _random_target(), "advance_on_next_run": False}
+    _save_state(new)
+    return new
+
+
+# ---------- Traits & image ----------
+def resolve_trait_labels(genotype: dict, round_cfg: dict) -> dict:
     labels = {}
-    for trait in TRAITS:
-        gene = trait["slot"]
-        val = state.get(gene, "rec")
-        labels[gene] = trait["dominant"] if val == "dom" else trait["recessive"]
+    for t in round_cfg["traits"]:
+        slot = t["slot"]
+        allele = genotype.get(slot, "rec")
+        labels[slot] = t["dominant"] if allele == "dom" else t["recessive"]
     return labels
 
 
-def _fallback_build_svg(trait_values: dict, caption: str) -> str:
-    """Simple built-in SVG (used if compose_svg.py not present)."""
-    body_color = "orange" if trait_values.get("A") == "Striped" else "gray"
-    eye_color = "green" if trait_values.get("B") == "Green Eyes" else "blue"
-    tail_shape = "long" if trait_values.get("C") == "Long Tail" else "stubby"
-    ear_type = "pointy" if trait_values.get("D") == "Pointy Ears" else "rounded"
-    pattern = "spots" if trait_values.get("E") == "Spotted" else "solid"
-
-    ear_left = (
-        "<polygon points='360,160 380,130 390,160' fill='{color}'/>"
-        if ear_type == "pointy"
-        else "<ellipse cx='370' cy='145' rx='10' ry='15' fill='{color}'/>"
-    ).format(color=body_color)
-    ear_right = (
-        "<polygon points='440,160 420,130 410,160' fill='{color}'/>"
-        if ear_type == "pointy"
-        else "<ellipse cx='430' cy='145' rx='10' ry='15' fill='{color}'/>"
-    ).format(color=body_color)
-    tail = (
-        "<rect x='515' y='270' width='70' height='15' rx='7' ry='7' fill='{color}'/>"
-        if tail_shape == "long"
-        else "<rect x='515' y='270' width='30' height='15' rx='7' ry='7' fill='{color}'/>"
-    ).format(color=body_color)
-
-    pattern_layer = ""
-    if pattern == "spots":
-        dots = [(360, 300), (385, 320), (410, 305), (395, 340), (430, 330)]
-        pattern_layer = "".join(f"<circle cx='{x}' cy='{y}' r='8' fill='rgba(0,0,0,0.25)'/>" for x, y in dots)
-
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="800" height="480">
-      <rect width="100%" height="100%" fill="#222"/>
-      <text x="400" y="50" font-size="28" text-anchor="middle" fill="white">{caption}</text>
-      <ellipse cx="400" cy="300" rx="120" ry="70" fill="{body_color}"/>
-      <circle cx="400" cy="200" r="50" fill="{body_color}"/>
-      <circle cx="380" cy="190" r="8" fill="{eye_color}"/>
-      <circle cx="420" cy="190" r="8" fill="{eye_color}"/>
-      {ear_left}{ear_right}{tail}{pattern_layer}
-      <rect y="400" width="100%" height="80" fill="#333"/>
-    </svg>"""
-
-
-def compose_svg(trait_values: dict, caption: str) -> str:
-    """Use external compose_svg if available; else fallback."""
-    if _compose_svg:
-        return _compose_svg(trait_values, caption)
-    return _fallback_build_svg(trait_values, caption)
-
-
-def prompt_from_traits(trait_values: dict) -> str:
-    """Turn trait labels into a clear, photoreal prompt."""
-    # Safely pull with defaults
-    A = trait_values.get("A", "").lower()  # body color/pattern
-    B = trait_values.get("B", "").lower()  # eye color
-    C = trait_values.get("C", "").lower()  # tail length
-    D = trait_values.get("D", "").lower()  # ear shape
-    E = trait_values.get("E", "").lower()  # pattern/coat
-
-    # Build a consistent, style-stable prompt
-    details = ", ".join(
-        filter(
-            None,
-            [
-                A or None,
-                E or None,
-                f"{B}" if B else None,
-                f"{D}" if D else None,
-                f"{C}" if C else None,
-            ],
-        )
-    )
-
-    # Add style guidance for consistency
+def prompt_from_traits(labels: dict, round_cfg: dict) -> str:
+    desc = ", ".join(labels[s["slot"]] for s in round_cfg["traits"])
     return (
-        f"Photorealistic studio portrait of a domestic cat, {details}. "
-        f"Neutral white background, soft even lighting, sharp focus, natural proportions, no accessories."
+        "Photorealistic studio portrait of a domestic cat, "
+        f"{desc}. Neutral white background, soft even lighting, "
+        "sharp focus, natural proportions, no accessories."
     )
 
 
-def try_generate_ai_image(prompt: str, save_path: Path) -> bool:
-    """Return True if an AI image was generated & saved, else False."""
+def try_ai(prompt: str, save_png: Path) -> bool:
     if not _USE_AI:
         return False
     try:
-        print(f"🖼️ AI image request → {prompt}")
-        resp = _openai_client.images.generate(
-            model="gpt-image-1",
-            prompt=prompt,
-            size="1024x1024",
-        )
-        b64 = resp.data[0].b64_json
-        save_path.write_bytes(base64.b64decode(b64))
-        print(f"✅ AI image saved → {save_path}")
+        r = _openai.images.generate(model="gpt-image-1", prompt=prompt, size="1024x1024")
+        img_b64 = r.data[0].b64_json
+        save_png.write_bytes(base64.b64decode(img_b64))
         return True
-    except Exception as e:
-        print(f"⚠️ AI image generation failed, falling back to SVG: {e}")
+    except Exception:
         return False
 
 
-def save_svg_png(trait_values: dict, caption: str) -> None:
-    """Create SVG fallback and render to PNG."""
-    svg = compose_svg(trait_values, caption)
+def fallback_svg(labels: dict, caption: str) -> str:
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="800" height="480">
+      <rect width="100%" height="100%" fill="#111"/>
+      <text x="400" y="60" font-size="28" text-anchor="middle" fill="#fff">{caption}</text>
+      <text x="400" y="120" font-size="18" text-anchor="middle" fill="#ddd">
+        {" • ".join(labels.values())}
+      </text>
+      <rect x="200" y="180" rx="20" ry="20" width="400" height="240" fill="#333" />
+      <text x="400" y="300" font-size="24" text-anchor="middle" fill="#bbb">Photo placeholder</text>
+    </svg>"""
+
+
+def save_svg_png(svg: str):
     SVG_PATH.write_text(svg, encoding="utf-8")
     cairosvg.svg2png(bytestring=svg.encode("utf-8"), write_to=str(PNG_PATH))
-    print(f"✅ Fallback SVG→PNG saved → {PNG_PATH}")
 
 
-def read_live_state_or_test(args) -> dict:
-    """Get genotype from sensors (live) or test args."""
-    if args.test:
-        print("🧪 Test mode active")
-        return {pair.split("=")[0].upper(): pair.split("=")[1].lower() for pair in args.test}
-    # Live sensors
+# ---------- Progress ----------
+def compute_matches(live: dict, target: dict) -> tuple[int, dict]:
+    """
+    live: {'A': {'allele': 'dom/rec/invalid/None', 'tile_id': 'A_DOM'/'A_REC'/None, ...}, ...}
+    target: {'A':'dom', ...}
+    """
+    matches = {}
+    correct = 0
+    for slot in SLOTS:
+        allele = live[slot]["allele"]
+        tileid = live[slot]["tile_id"]
+        if allele not in ("dom", "rec"):
+            matches[slot] = None
+            continue
+        allele_ok = allele == target[slot]
+        expected_id = TILE_ID_BY_SLOT[slot].get(target[slot])
+        id_ok = tileid == expected_id
+        ok = bool(allele_ok and id_ok)
+        matches[slot] = {"allele_ok": allele_ok, "id_ok": id_ok, "ok": ok}
+        if ok:
+            correct += 1
+    percent = int(round(100 * correct / len(SLOTS)))
+    return percent, matches
+
+
+def sevenseg_show(percent: int):
+    if not _segdev:
+        return
     try:
-        from sensors import GeneBoard
+        from luma.core.render import canvas
 
-        print("🧭 Reading from sensors...")
-        gb = GeneBoard()
-        return gb.read_and_light()  # {'A':'dom', ...}
-    except Exception as e:
-        print(f"⚠️ Sensors unavailable, defaulting to TEST-like random: {e}")
-        genes = ["A", "B", "C", "D", "E"]
-        import random
-
-        return {g: random.choice(["dom", "rec"]) for g in genes}
+        with canvas(_segdev) as draw:
+            draw.text((1, -1), f"{percent:3d}", fill="white")
+    except Exception:
+        pass
 
 
-# -----------------------------------------------------------
-# Main
-# -----------------------------------------------------------
-
-
+# ---------- Main ----------
 def main():
-    parser = argparse.ArgumentParser(description="Kitty CRISPR Generator")
-    parser.add_argument("--test", nargs="*", help="e.g. --test A=dom B=rec C=dom D=rec E=dom")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(description="Kitty CRISPR – sensors + LEDs + % + image")
+    ap.add_argument("--test", nargs="*", help="Mock alleles/tile_ids, e.g. --test A=dom B=rec C=dom")
+    ap.add_argument("--round", type=int, help="Override round id (resets target)")
+    ap.add_argument("--advance-now", action="store_true", help="Advance to next round immediately")
+    args = ap.parse_args()
 
-    state = read_live_state_or_test(args)
-    trait_values = resolve_trait_labels(state)
+    state = get_or_init_game_state(args.round)
+    state = (
+        maybe_advance_round(state)
+        if not args.advance_now
+        else maybe_advance_round({"current_round_id": state["current_round_id"], "advance_on_next_run": True})
+    )
+    current_round = _round_by_id(state["current_round_id"])
 
-    now = datetime.now()
-    code = "".join([state.get(t["slot"], "?")[0].upper() for t in TRAITS])
-    customer = CUSTOMER_TEMPLATES[now.day % len(CUSTOMER_TEMPLATES)]
-    caption = f"Customer: {customer}"
+    gb = GeneBoard()
+    try:
+        # Read board (or test)
+        if args.test:
+            live = {}
+            for kv in args.test:
+                k, v = kv.split("=")
+                k = k.upper()
+                v = v.lower()
+                live[k] = {"allele": v, "tile_id": f"{k}_{v.upper()}", "volts": 0.0}
+            for s in SLOTS:
+                live.setdefault(s, {"allele": None, "tile_id": None, "volts": 0.0})
+        else:
+            live = gb.snapshot()
 
-    # Try AI → fallback to SVG
-    used_method = "ai" if try_generate_ai_image(prompt_from_traits(trait_values), PNG_PATH) else "svg"
-    if used_method == "svg":
-        save_svg_png(trait_values, caption)
+        # Presence-only LEDs
+        gb.update_leds_presence(live)
 
-    # Write JSON summary
-    payload = {
-        "timestamp": now.isoformat(),
-        "genotype": state,
-        "phenotype": trait_values,
-        "caption": caption,
-        "code": code,
-        "png": str(PNG_PATH),
-        "svg": str(SVG_PATH) if SVG_PATH.exists() else None,
-        "method": used_method,
-    }
-    JSON_PATH.write_text(json.dumps(payload, indent=2))
-    print(f"✅ Saved summary → {JSON_PATH}")
-    print(json.dumps(payload, indent=2))
+        # Progress (allele + tile ID vs hidden target)
+        percent, matches = compute_matches(live, state["target_genotype"])
+
+        # 7-seg percent (optional)
+        sevenseg_show(percent)
+
+        # Build cat image (alleles-only → phenotype)
+        allele_only = {s: (live[s]["allele"] or "rec") for s in SLOTS}
+        labels = resolve_trait_labels(allele_only, current_round)
+        caption = f"Customer: {current_round['customer']}"
+        used = "ai" if try_ai(prompt_from_traits(labels, current_round), PNG_PATH) else "svg"
+        if used == "svg":
+            svg = fallback_svg(labels, caption)
+            save_svg_png(svg)
+
+        # If solved, schedule advance-on-next-run
+        if percent == 100:
+            st = _load_state()
+            st["current_round_id"] = current_round["id"]
+            st["target_genotype"] = state["target_genotype"]
+            st["advance_on_next_run"] = True
+            _save_state(st)
+
+        # Save summary
+        now = datetime.now()
+        payload = {
+            "timestamp": now.isoformat(),
+            "round_id": current_round["id"],
+            "round_name": current_round["name"],
+            "customer": current_round["customer"],
+            "genotype_live": {s: live[s]["allele"] for s in SLOTS},
+            "tile_ids": {s: live[s]["tile_id"] for s in SLOTS},
+            "phenotype": labels,
+            "png": str(PNG_PATH),
+            "svg": str(SVG_PATH) if SVG_PATH.exists() else None,
+            "method": used,
+            "progress_percent": percent,
+            "matches_by_slot": matches,
+            "advance_on_next_run": _load_state().get("advance_on_next_run", False),
+        }
+        JSON_PATH.write_text(json.dumps(payload, indent=2))
+        print(f"🏁 Progress: {percent}%")
+        print(f"✅ Saved → {JSON_PATH}")
+
+    finally:
+        gb.close()
 
 
 if __name__ == "__main__":
